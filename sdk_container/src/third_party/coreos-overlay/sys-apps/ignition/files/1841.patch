@@ -1,0 +1,449 @@
+From 6cb1703de286f71b469abdb8a313b7ac168d67dd Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Tue, 26 Mar 2024 14:08:48 +0000
+Subject: [PATCH 1/7] providers: add "akamai" provider
+
+The "akamai" provider adds support for retrieving an ignition
+configuration from Akamai Connected Cloud's (a.k.a. Linode) [Metadata
+Service][1].
+
+See: https://github.com/flatcar/Flatcar/issues/1404
+See: https://github.com/coreos/fedora-coreos-tracker/issues/1701
+Fixes: https://github.com/coreos/ignition/issues/1508
+
+[1]: https://www.linode.com/docs/products/compute/compute-instances/guides/metadata/
+---
+ docs/supported-platforms.md         |  2 +
+ internal/providers/akamai/akamai.go | 88 +++++++++++++++++++++++++++++
+ internal/resource/url.go            |  4 ++
+ 3 files changed, 94 insertions(+)
+ create mode 100644 internal/providers/akamai/akamai.go
+
+diff --git a/docs/supported-platforms.md b/docs/supported-platforms.md
+index f0318339a..8dc0feb13 100644
+--- a/docs/supported-platforms.md
++++ b/docs/supported-platforms.md
+@@ -6,6 +6,7 @@ nav_order: 8
+ 
+ Ignition is currently only supported for the following platforms:
+ 
++* [Akamai Connected Cloud] (`akamai`) - Ignition will read its configuration from the instance userdata. Cloud SSH keys and network configuration are handled separately.
+ * [Alibaba Cloud] (`aliyun`) - Ignition will read its configuration from the instance userdata. Cloud SSH keys are handled separately.
+ * [Apple Hypervisor] (`applehv`) - Ignition will read its configuration using an HTTP GET over a vsock connection with its host on port 1024.
+ * [Amazon Web Services] (`aws`) - Ignition will read its configuration from the instance userdata. Cloud SSH keys are handled separately.
+@@ -36,6 +37,7 @@ Ignition is under active development, so this list may grow over time.
+ 
+ For most cloud providers, cloud SSH keys and custom network configuration are handled by [Afterburn].
+ 
++[Akamai Connected Cloud]: https://www.linode.com
+ [Alibaba Cloud]: https://www.alibabacloud.com/product/ecs
+ [Apple Hypervisor]: https://developer.apple.com/documentation/hypervisor
+ [Amazon Web Services]: https://aws.amazon.com/ec2/
+diff --git a/internal/providers/akamai/akamai.go b/internal/providers/akamai/akamai.go
+new file mode 100644
+index 000000000..73fecaa20
+--- /dev/null
++++ b/internal/providers/akamai/akamai.go
+@@ -0,0 +1,88 @@
++// Copyright 2024 CoreOS, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Package akamai provides platform support for Akamai Connected Cloud
++// (previously known as Linode).
++package akamai
++
++import (
++	"encoding/base64"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/url"
++
++	"github.com/flatcar/ignition/v2/config/v3_5_experimental/types"
++	"github.com/flatcar/ignition/v2/internal/platform"
++	"github.com/flatcar/ignition/v2/internal/providers/util"
++	"github.com/flatcar/ignition/v2/internal/resource"
++
++	"github.com/coreos/vcontext/report"
++)
++
++func init() {
++	platform.Register(platform.Provider{
++		Name:  "akamai",
++		Fetch: fetchConfig,
++		Init:  initFetcher,
++	})
++}
++
++var (
++	tokenURL    = url.URL{Scheme: "http", Host: "169.254.169.254", Path: "/v1/token"}
++	userdataURL = url.URL{Scheme: "http", Host: "169.254.169.254", Path: "/v1/user-data"}
++)
++
++func fetchConfig(f *resource.Fetcher) (types.Config, report.Report, error) {
++	if f.AkamaiMetadataToken == "" {
++		return types.Config{}, report.Report{}, errors.New("akamai metadata token not set")
++	}
++
++	encoded, err := f.FetchToBuffer(userdataURL, resource.FetchOptions{
++		Headers: http.Header{
++			"Metadata-Token": []string{f.AkamaiMetadataToken},
++		},
++	})
++	if err != nil {
++		return types.Config{}, report.Report{}, err
++	}
++
++	// The Linode Metadata Service requires userdata to be base64-encoded
++	// when it is uploaded.
++	data := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
++	if _, err := base64.StdEncoding.Decode(data, encoded); err != nil {
++		return types.Config{}, report.Report{}, fmt.Errorf("decode base64: %w", err)
++	}
++
++	return util.ParseConfig(f.Logger, data)
++}
++
++func initFetcher(f *resource.Fetcher) error {
++	token, err := f.FetchToBuffer(tokenURL, resource.FetchOptions{
++		HTTPVerb: http.MethodPut,
++		Headers: http.Header{
++			"Metadata-Token-Expiry-Seconds": []string{"3600"},
++		},
++	})
++
++	// NOTE: ErrNotFound could mean the instance is running in a region
++	// where the Metadata Service has not been deployed.
++	if err != nil {
++		return fmt.Errorf("generate metadata api token: %w", err)
++	}
++
++	f.AkamaiMetadataToken = string(token)
++
++	return nil
++}
+diff --git a/internal/resource/url.go b/internal/resource/url.go
+index ad548a497..0c7c662f5 100644
+--- a/internal/resource/url.go
++++ b/internal/resource/url.go
+@@ -98,6 +98,10 @@ type Fetcher struct {
+ 	// It is used when fetching resources from GCS.
+ 	GCSSession *storage.Client
+ 
++	// AkamaiMetadataToken holds the token returned by the Metadata Service
++	// and is required for subsequent requests.
++	AkamaiMetadataToken string
++
+ 	// Whether to only attempt fetches which can be performed offline. This
+ 	// currently only includes the "data" scheme. Other schemes will result in
+ 	// ErrNeedNet. In the future, we can improve on this by dropping this
+
+From 62725fdd6ab8a9bdf4a8920cd5135a2f032ee058 Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Wed, 27 Mar 2024 04:01:12 +0000
+Subject: [PATCH 2/7] docs: Add Akamai/Linode provider to release notes
+
+---
+ docs/release-notes.md | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/docs/release-notes.md b/docs/release-notes.md
+index 6510ccde7..7dcecbd21 100644
+--- a/docs/release-notes.md
++++ b/docs/release-notes.md
+@@ -10,6 +10,8 @@ nav_order: 9
+ 
+ ### Features
+ 
++- Support Akamai Connected Cloud (Linode)
++
+ ### Changes
+ 
+ ### Bug fixes
+
+From 1fbae1488f2e216176f084ce9bca2e42b0be322a Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Wed, 27 Mar 2024 15:11:09 +0000
+Subject: [PATCH 3/7] fixup! providers: add "akamai" provider
+
+---
+ internal/register/providers.go | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/internal/register/providers.go b/internal/register/providers.go
+index e7a06b382..5382e2f3a 100644
+--- a/internal/register/providers.go
++++ b/internal/register/providers.go
+@@ -15,6 +15,7 @@
+ package register
+ 
+ import (
++	_ "github.com/flatcar/ignition/v2/internal/providers/akamai"
+ 	_ "github.com/flatcar/ignition/v2/internal/providers/aliyun"
+ 	_ "github.com/flatcar/ignition/v2/internal/providers/applehv"
+ 	_ "github.com/flatcar/ignition/v2/internal/providers/aws"
+
+From 3cac914a02ca35b15bf313fee122f3ed46a72547 Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Mon, 1 Apr 2024 18:47:23 +0000
+Subject: [PATCH 4/7] fixup! providers: add "akamai" provider
+
+---
+ internal/providers/akamai/akamai.go | 38 ++++++++++-------------------
+ internal/resource/url.go            |  4 ---
+ 2 files changed, 13 insertions(+), 29 deletions(-)
+
+diff --git a/internal/providers/akamai/akamai.go b/internal/providers/akamai/akamai.go
+index 73fecaa20..7ec14a9bf 100644
+--- a/internal/providers/akamai/akamai.go
++++ b/internal/providers/akamai/akamai.go
+@@ -35,7 +35,6 @@ func init() {
+ 	platform.Register(platform.Provider{
+ 		Name:  "akamai",
+ 		Fetch: fetchConfig,
+-		Init:  initFetcher,
+ 	})
+ }
+ 
+@@ -45,21 +44,29 @@ var (
+ )
+ 
+ func fetchConfig(f *resource.Fetcher) (types.Config, report.Report, error) {
+-	if f.AkamaiMetadataToken == "" {
+-		return types.Config{}, report.Report{}, errors.New("akamai metadata token not set")
++	token, err := f.FetchToBuffer(tokenURL, resource.FetchOptions{
++		HTTPVerb: http.MethodPut,
++		Headers: http.Header{
++			"Metadata-Token-Expiry-Seconds": []string{"3600"},
++		},
++	})
++	if err != nil {
++		// NOTE: The instance could be running in a region where the
++		// Metadata Service has not yet been deployed.
++		return types.Config{}, report.Report{}, fmt.Errorf("generate metadata api token: %w", err)
+ 	}
+ 
+ 	encoded, err := f.FetchToBuffer(userdataURL, resource.FetchOptions{
+ 		Headers: http.Header{
+-			"Metadata-Token": []string{f.AkamaiMetadataToken},
++			"Metadata-Token": []string{string(token)},
+ 		},
+ 	})
+ 	if err != nil {
+-		return types.Config{}, report.Report{}, err
++		return types.Config{}, report.Report{}, fmt.Errorf("fetch userdata: %w", err)
+ 	}
+ 
+ 	// The Linode Metadata Service requires userdata to be base64-encoded
+-	// when it is uploaded.
++	// when it is uploaded, so we will have to decode the response.
+ 	data := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
+ 	if _, err := base64.StdEncoding.Decode(data, encoded); err != nil {
+ 		return types.Config{}, report.Report{}, fmt.Errorf("decode base64: %w", err)
+@@ -67,22 +74,3 @@ func fetchConfig(f *resource.Fetcher) (types.Config, report.Report, error) {
+ 
+ 	return util.ParseConfig(f.Logger, data)
+ }
+-
+-func initFetcher(f *resource.Fetcher) error {
+-	token, err := f.FetchToBuffer(tokenURL, resource.FetchOptions{
+-		HTTPVerb: http.MethodPut,
+-		Headers: http.Header{
+-			"Metadata-Token-Expiry-Seconds": []string{"3600"},
+-		},
+-	})
+-
+-	// NOTE: ErrNotFound could mean the instance is running in a region
+-	// where the Metadata Service has not been deployed.
+-	if err != nil {
+-		return fmt.Errorf("generate metadata api token: %w", err)
+-	}
+-
+-	f.AkamaiMetadataToken = string(token)
+-
+-	return nil
+-}
+diff --git a/internal/resource/url.go b/internal/resource/url.go
+index 0c7c662f5..ad548a497 100644
+--- a/internal/resource/url.go
++++ b/internal/resource/url.go
+@@ -98,10 +98,6 @@ type Fetcher struct {
+ 	// It is used when fetching resources from GCS.
+ 	GCSSession *storage.Client
+ 
+-	// AkamaiMetadataToken holds the token returned by the Metadata Service
+-	// and is required for subsequent requests.
+-	AkamaiMetadataToken string
+-
+ 	// Whether to only attempt fetches which can be performed offline. This
+ 	// currently only includes the "data" scheme. Other schemes will result in
+ 	// ErrNeedNet. In the future, we can improve on this by dropping this
+
+From fd0e561027ad32374dc8a8bbc3d2b0f73947212f Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Tue, 2 Apr 2024 17:56:58 +0000
+Subject: [PATCH 5/7] fixup! providers: add "akamai" provider
+
+---
+ internal/providers/akamai/akamai.go | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/internal/providers/akamai/akamai.go b/internal/providers/akamai/akamai.go
+index 7ec14a9bf..2eb4a2e50 100644
+--- a/internal/providers/akamai/akamai.go
++++ b/internal/providers/akamai/akamai.go
+@@ -18,7 +18,6 @@ package akamai
+ 
+ import (
+ 	"encoding/base64"
+-	"errors"
+ 	"fmt"
+ 	"net/http"
+ 	"net/url"
+
+From 6befdfeea768f7f329944e772436ea6bfece8624 Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Wed, 3 Apr 2024 03:15:09 +0000
+Subject: [PATCH 6/7] fixup! providers: add "akamai" provider
+
+---
+ internal/providers/akamai/akamai.go | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/internal/providers/akamai/akamai.go b/internal/providers/akamai/akamai.go
+index 2eb4a2e50..4810902b7 100644
+--- a/internal/providers/akamai/akamai.go
++++ b/internal/providers/akamai/akamai.go
+@@ -43,6 +43,10 @@ var (
+ )
+ 
+ func fetchConfig(f *resource.Fetcher) (types.Config, report.Report, error) {
++	if f.Offline {
++		return types.Config{}, report.Report{}, resource.ErrNeedNet
++	}
++
+ 	token, err := f.FetchToBuffer(tokenURL, resource.FetchOptions{
+ 		HTTPVerb: http.MethodPut,
+ 		Headers: http.Header{
+
+From 3ed05b24dacac0868a3450faa0452fab96e5f6f2 Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Wed, 3 Apr 2024 20:59:17 +0000
+Subject: [PATCH 7/7] fixup! providers: add "akamai" provider
+
+---
+ internal/providers/akamai/akamai.go | 63 ++++++++++++++++++++++++-----
+ 1 file changed, 53 insertions(+), 10 deletions(-)
+
+diff --git a/internal/providers/akamai/akamai.go b/internal/providers/akamai/akamai.go
+index 4810902b7..e832f855c 100644
+--- a/internal/providers/akamai/akamai.go
++++ b/internal/providers/akamai/akamai.go
+@@ -17,7 +17,9 @@
+ package akamai
+ 
+ import (
++	"bytes"
+ 	"encoding/base64"
++	"errors"
+ 	"fmt"
+ 	"net/http"
+ 	"net/url"
+@@ -37,9 +39,25 @@ func init() {
+ 	})
+ }
+ 
++// HTTP headers.
++const (
++	// tokenTTLHeader is the name of the HTTP request header that must be
++	// set when making requests to [tokenURL] or [tokenURL6].
++	tokenTTLHeader = "Metadata-Token-Expiry-Seconds"
++
++	// tokenHeader is the name of the HTTP request header that callers must
++	// set when making requests to [userdataURL] or [userdataURL6].
++	tokenHeader = "Metadata-Token"
++)
++
+ var (
++	// IPv4 URLs.
+ 	tokenURL    = url.URL{Scheme: "http", Host: "169.254.169.254", Path: "/v1/token"}
+ 	userdataURL = url.URL{Scheme: "http", Host: "169.254.169.254", Path: "/v1/user-data"}
++
++	// IPv6 URLs (for reference).
++	tokenURL6    = url.URL{Scheme: "http", Host: "[fd00:a9fe:a9fe::1]", Path: "/v1/token"}
++	userdataURL6 = url.URL{Scheme: "http", Host: "[fd00:a9fe:a9fe::1]", Path: "/v1/user-data"}
+ )
+ 
+ func fetchConfig(f *resource.Fetcher) (types.Config, report.Report, error) {
+@@ -47,21 +65,18 @@ func fetchConfig(f *resource.Fetcher) (types.Config, report.Report, error) {
+ 		return types.Config{}, report.Report{}, resource.ErrNeedNet
+ 	}
+ 
+-	token, err := f.FetchToBuffer(tokenURL, resource.FetchOptions{
+-		HTTPVerb: http.MethodPut,
+-		Headers: http.Header{
+-			"Metadata-Token-Expiry-Seconds": []string{"3600"},
+-		},
+-	})
++	token, err := getToken(f)
+ 	if err != nil {
+-		// NOTE: The instance could be running in a region where the
+-		// Metadata Service has not yet been deployed.
+-		return types.Config{}, report.Report{}, fmt.Errorf("generate metadata api token: %w", err)
++		return types.Config{}, report.Report{}, fmt.Errorf("get token: %w", err)
+ 	}
+ 
++	// NOTE: If we do not explicitly set the "Accept" header, it will be
++	// set by FetchToBuffer to a value that the Linode Metadata Service
++	// does not accept.
+ 	encoded, err := f.FetchToBuffer(userdataURL, resource.FetchOptions{
+ 		Headers: http.Header{
+-			"Metadata-Token": []string{string(token)},
++			"Accept":    []string{"text/plain"},
++			tokenHeader: []string{string(token)},
+ 		},
+ 	})
+ 	if err != nil {
+@@ -77,3 +92,31 @@ func fetchConfig(f *resource.Fetcher) (types.Config, report.Report, error) {
+ 
+ 	return util.ParseConfig(f.Logger, data)
+ }
++
++// getToken retrieves an authorization token to use for subsequent requests to
++// Linode's Metadata Service.
++// The returned token must be provided in the [tokenHeader] request header.
++func getToken(f *resource.Fetcher) (token string, err error) {
++	// NOTE: This is using "text/plain" for content negotiation, just to
++	// skip the need to decode a JSON response.
++	// In the future, the accepted content type should probably become
++	// "application/vnd.coreos.ignition+json", but that will require
++	// support from Linode's Metadata Service API.
++	p, err := f.FetchToBuffer(tokenURL, resource.FetchOptions{
++		HTTPVerb: http.MethodPut,
++		Headers: http.Header{
++			"Accept":       []string{"text/plain"},
++			tokenTTLHeader: []string{"3600"},
++		},
++	})
++	if err != nil {
++		return "", fmt.Errorf("fetch to buffer: %w", err)
++	}
++
++	p = bytes.TrimSpace(p)
++	if len(p) == 0 {
++		return "", errors.New("receieved an empty token")
++	}
++
++	return string(p), nil
++}
