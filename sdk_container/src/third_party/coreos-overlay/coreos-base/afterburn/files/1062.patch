@@ -1,0 +1,693 @@
+From 983e9aca0b9c2efe71828f8c2334f4aedf2abec6 Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Mon, 1 Apr 2024 19:48:29 +0000
+Subject: [PATCH 1/4] providers: Add "akamai" provider
+
+The "akamai" provider adds support for retrieving configuration from
+Akamai Connected Cloud's (a.k.a. Linode) [Metadata
+Service][metadata-service].
+
+References: https://github.com/flatcar/Flatcar/issues/1404
+References: https://github.com/coreos/fedora-coreos-tracker/issues/1701
+References: https://github.com/coreos/ignition/pull/1841
+
+[metadata-service]: https://www.linode.com/docs/products/compute/compute-instances/guides/metadata/
+---
+ src/metadata.rs                    |   2 +
+ src/providers/akamai/mock_tests.rs |  99 ++++++++++
+ src/providers/akamai/mod.rs        | 305 +++++++++++++++++++++++++++++
+ src/providers/mod.rs               |   1 +
+ 4 files changed, 407 insertions(+)
+ create mode 100644 src/providers/akamai/mock_tests.rs
+ create mode 100644 src/providers/akamai/mod.rs
+
+diff --git a/src/metadata.rs b/src/metadata.rs
+index f27dc7e4..b89bf5b3 100644
+--- a/src/metadata.rs
++++ b/src/metadata.rs
+@@ -15,6 +15,7 @@
+ use anyhow::{bail, Result};
+ 
+ use crate::providers;
++use crate::providers::akamai::AkamaiProvider;
+ use crate::providers::aliyun::AliyunProvider;
+ use crate::providers::aws::AwsProvider;
+ use crate::providers::cloudstack::configdrive::ConfigDrive;
+@@ -49,6 +50,7 @@ macro_rules! box_result {
+ /// to the provider-specific fetch logic.
+ pub fn fetch_metadata(provider: &str) -> Result<Box<dyn providers::MetadataProvider>> {
+     match provider {
++        "akamai" => box_result!(AkamaiProvider::try_new()?),
+         "aliyun" => box_result!(AliyunProvider::try_new()?),
+         "aws" => box_result!(AwsProvider::try_new()?),
+         "azure" => box_result!(Azure::try_new()?),
+diff --git a/src/providers/akamai/mock_tests.rs b/src/providers/akamai/mock_tests.rs
+new file mode 100644
+index 00000000..378789bf
+--- /dev/null
++++ b/src/providers/akamai/mock_tests.rs
+@@ -0,0 +1,99 @@
++use super::{HDR_TOKEN, HDR_TOKEN_EXPIRY, TOKEN_TTL};
++use crate::providers::{akamai::AkamaiProvider, MetadataProvider};
++use mockito::{self};
++
++#[test]
++fn test_attributes() {
++    let mut server = mockito::Server::new();
++    let token = "deadbeefcafebabe";
++
++    // Mock the PUT /v1/token endpoint.
++    let put_v1_token = server
++        .mock("PUT", "/v1/token")
++        .match_header(HDR_TOKEN_EXPIRY, TOKEN_TTL)
++        .with_body(token)
++        .expect_at_least(1)
++        .create();
++
++    // Mock the GET /v1/instance endpoint.
++    let instance_metadata = r#"{
++        "id": 12345678,
++        "label": "my-linode",
++        "region": "us-ord",
++        "type": "g6-nanode-1",
++        "specs": {
++            "vcpus": 1,
++            "memory": 1024,
++            "gpus": 0,
++            "transfer": 1000,
++            "disk": 25600
++        },
++        "backups": {
++            "enabled": false,
++            "status": null
++        },
++        "host_uuid": "a631b16d14534d84e2830da16d1b28e1d08d24df",
++        "tags": ["foo", "bar", "baz"]
++    }"#;
++
++    let get_v1_instance = server
++        .mock("GET", "/v1/instance")
++        .match_header("Accept", "application/json")
++        .match_header(HDR_TOKEN, token)
++        .with_body(instance_metadata)
++        .create();
++
++    // Mock the /v1/network endpoint.
++    let network_metadata = r#"{
++        "interfaces": [],
++        "ipv4": {
++            "public": [
++                "1.2.3.4/32"
++            ],
++            "private": [
++                "192.168.1.1/32"
++            ],
++            "shared": []
++        },
++        "ipv6": {
++            "slaac": "2600:3c06::f03c:94ff:fecb:c10b/128",
++            "ranges": [],
++            "link_local": "fe80::f03c:94ff:fecb:c10b/128",
++            "shared_ranges": []
++        }
++    }"#;
++
++    let get_v1_network = server
++        .mock("GET", "/v1/network")
++        .match_header("Accept", "application/json")
++        .match_header(HDR_TOKEN, token)
++        .with_body(network_metadata)
++        .create();
++
++    let mut provider = AkamaiProvider::try_new().unwrap();
++    provider.client = provider.client.max_retries(0).mock_base_url(server.url());
++
++    let attrs = provider.attributes();
++
++    // Assert that our endpoints were called.
++    put_v1_token.assert();
++    get_v1_instance.assert();
++    get_v1_network.assert();
++
++    let actual = attrs.unwrap();
++    let expected = maplit::hashmap! {
++        "AKAMAI_INSTANCE_ID".to_string() => "12345678".to_string(),
++        "AKAMAI_INSTANCE_HOST_UUID".to_string() => "a631b16d14534d84e2830da16d1b28e1d08d24df".to_string(),
++        "AKAMAI_INSTANCE_LABEL".to_string() => "my-linode".to_string(),
++        "AKAMAI_INSTANCE_REGION".to_string() => "us-ord".to_string(),
++        "AKAMAI_INSTANCE_TYPE".to_string() => "g6-nanode-1".to_string(),
++        "AKAMAI_INSTANCE_TAGS".to_string() => "foo:bar:baz".to_string(),
++        "AKAMAI_IPV4_PUBLIC_0".to_string() => "1.2.3.4/32".to_string(),
++        "AKAMAI_IPV4_PRIVATE_0".to_string() => "192.168.1.1/32".to_string(),
++        "AKAMAI_IPV6_SLAAC".to_string() => "2600:3c06::f03c:94ff:fecb:c10b/128".to_string(),
++        "AKAMAI_IPV6_LINK_LOCAL".to_string() => "fe80::f03c:94ff:fecb:c10b/128".to_string(),
++    };
++    assert_eq!(expected, actual);
++
++    server.reset();
++}
+diff --git a/src/providers/akamai/mod.rs b/src/providers/akamai/mod.rs
+new file mode 100644
+index 00000000..69a22079
+--- /dev/null
++++ b/src/providers/akamai/mod.rs
+@@ -0,0 +1,305 @@
++// Copyright 2024 CoreOS, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++//! Metadata fetcher for Akamai Connected Cloud (Linode).
++//!
++//! The Metadata Service's API specification is described in [Guides - Overview of the Metadata
++//! Service](https://www.linode.com/docs/products/compute/compute-instances/guides/metadata/).
++
++#[cfg(test)]
++mod mock_tests;
++
++use anyhow::{anyhow, Context, Result};
++use openssh_keys::PublicKey;
++use reqwest::header::{HeaderName, HeaderValue};
++use serde::Deserialize;
++use std::collections::HashMap;
++
++// use crate::network;
++use crate::providers::MetadataProvider;
++use crate::retry;
++
++const TOKEN_URL: &'static str = "http://169.254.169.254/v1/token";
++const INSTANCE_METADATA_URL: &'static str = "http://169.254.169.254/v1/instance";
++const NETWORK_METADATA_URL: &'static str = "http://169.254.169.254/v1/network";
++const SSHKEYS_URL: &'static str = "http://169.254.169.254/v1/ssh-keys";
++
++static HDR_TOKEN_EXPIRY: &str = "metadata-token-expiry-seconds";
++static HDR_TOKEN: &str = "metadata-token";
++
++static TOKEN_TTL: &str = "3600";
++
++pub struct AkamaiProvider {
++    client: retry::Client,
++}
++
++impl AkamaiProvider {
++    /// Instantiate a new `AkamaiProvider`.
++    pub fn try_new() -> Result<Self> {
++        let client = retry::Client::try_new()?;
++        Ok(Self { client })
++    }
++
++    fn token(&self) -> Result<HeaderValue> {
++        let token: String = self
++            .client
++            .put(retry::Raw, TOKEN_URL.to_string(), None)
++            .header(
++                HeaderName::from_static(HDR_TOKEN_EXPIRY),
++                HeaderValue::from_static(TOKEN_TTL),
++            )
++            .dispatch_put()?
++            .ok_or_else(|| anyhow!("get metadata token"))?;
++
++        let token = HeaderValue::from_str(&token).context("create header value from token")?;
++        Ok(token)
++    }
++
++    /// Fetch the instance metadata.
++    fn fetch_instance_metadata(&self) -> Result<Instance> {
++        let token = self.token()?;
++        let instance: Instance = self
++            .client
++            .get(retry::Json, INSTANCE_METADATA_URL.to_string())
++            .header(HeaderName::from_static(HDR_TOKEN), token)
++            .header(
++                HeaderName::from_static("accept"),
++                HeaderValue::from_static("application/json"),
++            )
++            .send()?
++            .ok_or_else(|| anyhow!("instance metadata not found"))?;
++        Ok(instance)
++    }
++
++    /// Fetch the network metadata.
++    fn fetch_network_metadata(&self) -> Result<Network> {
++        let network: Network = self
++            .client
++            .get(retry::Json, NETWORK_METADATA_URL.to_string())
++            .header(HeaderName::from_static(HDR_TOKEN), self.token()?)
++            .header(
++                HeaderName::from_static("accept"),
++                HeaderValue::from_static("application/json"),
++            )
++            .send()?
++            .ok_or_else(|| anyhow!("network metadata not found"))?;
++        Ok(network)
++    }
++
++    /// Fetch the SSH keys.
++    fn fetch_ssh_keys(&self) -> Result<SshKeys> {
++        let ssh_keys: SshKeys = self
++            .client
++            .get(retry::Json, SSHKEYS_URL.to_string())
++            .header(HeaderName::from_static(HDR_TOKEN), self.token()?)
++            .header(
++                HeaderName::from_static("accept"),
++                HeaderValue::from_static("application/json"),
++            )
++            .send()?
++            .ok_or_else(|| anyhow!("ssh keys not found"))?;
++        Ok(ssh_keys)
++    }
++
++    /// Convert instance and network metadata into environment variables.
++    /// All of the instance-related metadata variable names start with `AKAMAI_INSTANCE_`.
++    /// All of the IPv4 network-related metadata variable names start with `AKAMAI_IPV4_`.
++    /// All of the IPv6 network-related metadata variable names start with `AKAMAI_IPV6_`.
++    fn parse_attrs(&self) -> Result<Vec<(String, String)>> {
++        let data = self.fetch_instance_metadata()?;
++        let mut attrs = vec![
++            ("AKAMAI_INSTANCE_ID".to_string(), data.id.to_string()),
++            (
++                "AKAMAI_INSTANCE_HOST_UUID".to_string(),
++                data.host_uuid.clone(),
++            ),
++            ("AKAMAI_INSTANCE_LABEL".to_string(), data.label.clone()),
++            ("AKAMAI_INSTANCE_REGION".to_string(), data.region.clone()),
++            ("AKAMAI_INSTANCE_TYPE".to_string(), data.r#type.clone()),
++            ("AKAMAI_INSTANCE_TAGS".to_string(), data.tags.join(":")),
++        ];
++
++        let data = self.fetch_network_metadata()?;
++
++        // Compute the capacity of the Vec for holding all of the network attributes.
++        // The +2 is for the IPv6 SLAAC and link-local addresses.
++        let capacity: usize = data.ipv4.public.len()
++            + data.ipv4.private.len()
++            + data.ipv4.shared.len()
++            + 2
++            + data.ipv6.ranges.len()
++            + data.ipv6.shared_ranges.len();
++        let mut net_attrs: Vec<(String, String)> = Vec::with_capacity(capacity);
++
++        // IPv4
++        for (i, addr) in data.ipv4.public.iter().enumerate() {
++            net_attrs.push((format!("AKAMAI_IPV4_PUBLIC_{i}"), format!("{addr}")));
++        }
++
++        for (i, addr) in data.ipv4.private.iter().enumerate() {
++            net_attrs.push((format!("AKAMAI_IPV4_PRIVATE_{i}"), format!("{addr}")));
++        }
++
++        for (i, addr) in data.ipv4.shared.iter().enumerate() {
++            net_attrs.push((format!("AKAMAI_IPV4_SHARED_{i}"), format!("{addr}")));
++        }
++
++        // IPv6
++        net_attrs.push(("AKAMAI_IPV6_SLAAC".to_string(), data.ipv6.slaac.clone()));
++        net_attrs.push((
++            "AKAMAI_IPV6_LINK_LOCAL".to_string(),
++            data.ipv6.link_local.clone(),
++        ));
++        for (i, v) in data.ipv6.ranges.iter().enumerate() {
++            net_attrs.push((format!("AKAMAI_IPV6_RANGE_{i}"), format!("{v}")));
++        }
++        for (i, v) in data.ipv6.shared_ranges.iter().enumerate() {
++            net_attrs.push((format!("AKAMAI_IPV6_SHARED_RANGE_{i}"), format!("{v}")));
++        }
++
++        // Merge the network attributes and the instance attributes.
++        attrs.extend(net_attrs);
++
++        Ok(attrs)
++    }
++}
++
++impl MetadataProvider for AkamaiProvider {
++    fn attributes(&self) -> Result<HashMap<String, String>> {
++        let attrs = self.parse_attrs()?;
++        Ok(attrs.into_iter().collect())
++    }
++
++    fn hostname(&self) -> Result<Option<String>> {
++        let data = self.fetch_instance_metadata()?;
++        Ok(Some(data.label.clone()))
++    }
++
++    fn ssh_keys(&self) -> Result<Vec<PublicKey>> {
++        let ssh_keys = self.fetch_ssh_keys()?;
++        let all_keys: Vec<String> = ssh_keys.users.into_values().flatten().collect();
++
++        let mut public_keys: Vec<PublicKey> = Vec::with_capacity(all_keys.len());
++        for k in all_keys {
++            let key = PublicKey::parse(&k)?;
++            public_keys.push(key);
++        }
++
++        Ok(public_keys)
++    }
++
++    // TODO: See if this can be implemented with the information that comes back from the
++    // /v1/network endpoint.
++    // fn networks(&self) -> Result<Vec<network::Interface>> {
++    //     unimplemented!()
++    // }
++}
++
++#[derive(Clone, Deserialize)]
++struct Instance {
++    id: i64,
++    host_uuid: String,
++    label: String,
++    region: String,
++    r#type: String,
++    tags: Vec<String>,
++    #[allow(dead_code)]
++    specs: Specs,
++    #[allow(dead_code)]
++    backups: Backups,
++}
++
++#[allow(dead_code)]
++#[derive(Clone, Deserialize)]
++struct Specs {
++    // Total number of virtual CPU cores on the instance.
++    // Currently, the largest offering is 64 vCPUs on a `g6-dedicated-64` instance type.
++    vcpus: u8,
++
++    // Total amount of instance memory, in MB (not MiB).
++    memory: u64,
++
++    // Total amount of local disk, in MB.
++    //
++    // NOTE: This is a strange number. For example, an instance with 25GB of disk has a reported
++    // size of `25600`.
++    disk: u64,
++
++    // The monthly network transfer limit for the instance, in GB (not GiB).
++    // For a 1TB monthly transfer limit, this value would be `1000`.
++    transfer: u64,
++
++    // Total number of available GPUs.
++    gpus: u8,
++}
++
++#[allow(dead_code)]
++#[derive(Clone, Deserialize)]
++struct Backups {
++    enabled: bool,
++    status: Option<BackupStatus>,
++}
++
++#[allow(dead_code)]
++#[derive(Clone, Deserialize)]
++#[serde(untagged, rename_all = "lowercase")]
++enum BackupStatus {
++    Pending,
++    Running,
++    Complete,
++}
++
++#[derive(Clone, Deserialize)]
++struct Network {
++    #[allow(dead_code)]
++    interfaces: Vec<NetworkInterface>,
++    ipv4: Ipv4,
++    ipv6: Ipv6,
++}
++
++#[allow(dead_code)]
++#[derive(Clone, Deserialize)]
++struct NetworkInterface {
++    purpose: InterfacePurpose,
++    label: String,
++    ipam_address: Option<String>,
++}
++
++#[derive(Clone, Deserialize)]
++#[serde(untagged, rename_all = "lowercase")]
++enum InterfacePurpose {
++    Public,
++    Vlan,
++}
++
++#[derive(Clone, Deserialize)]
++struct Ipv4 {
++    public: Vec<String>,
++    private: Vec<String>,
++    shared: Vec<String>,
++}
++
++#[derive(Clone, Deserialize)]
++struct Ipv6 {
++    slaac: String,              // undocumented
++    ranges: Vec<String>,        // ???
++    link_local: String,         // snake_case is correct, documentation is wrong
++    shared_ranges: Vec<String>, // undocumented, might be "elastic-ranges" in the doc
++}
++
++#[derive(Clone, Deserialize)]
++struct SshKeys {
++    // Mapping of user names, to a list of public keys.
++    users: HashMap<String, Vec<String>>,
++}
+diff --git a/src/providers/mod.rs b/src/providers/mod.rs
+index 0fb01f4a..ab9698a7 100644
+--- a/src/providers/mod.rs
++++ b/src/providers/mod.rs
+@@ -23,6 +23,7 @@
+ //! function to fetch the metadata, and then add a match line in the top-level
+ //! `fetch_metadata()` function in metadata.rs.
+ 
++pub mod akamai;
+ pub mod aliyun;
+ pub mod aws;
+ pub mod cloudstack;
+
+From c9b99ac58ad95524ad65129ede2746a2b1d60802 Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Tue, 2 Apr 2024 18:54:33 +0000
+Subject: [PATCH 2/4] fixup! providers: Add "akamai" provider
+
+---
+ systemd/afterburn-sshkeys@.service.in | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/systemd/afterburn-sshkeys@.service.in b/systemd/afterburn-sshkeys@.service.in
+index 9e889fb9..5709131e 100644
+--- a/systemd/afterburn-sshkeys@.service.in
++++ b/systemd/afterburn-sshkeys@.service.in
+@@ -5,6 +5,7 @@ Description=Afterburn (SSH Keys)
+ # (e.g. via optional platform components); those platforms need a user-provided
+ # dropin, adding an appropriate triggering condition and setting the value of
+ # `AFTERBURN_OPT_PROVIDER` as needed.
++ConditionKernelCommandLine=|ignition.platform.id=akamai
+ ConditionKernelCommandLine=|ignition.platform.id=aliyun
+ ConditionKernelCommandLine=|ignition.platform.id=aws
+ ConditionKernelCommandLine=|ignition.platform.id=azure
+
+From e9fed87457602a89734a060ba40cfda42d2aae36 Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Tue, 2 Apr 2024 19:14:57 +0000
+Subject: [PATCH 3/4] fixup! providers: Add "akamai" provider
+
+---
+ docs/platforms.md                  |  3 +++
+ docs/release-notes.md              |  2 ++
+ docs/usage/attributes.md           | 14 ++++++++++++++
+ src/providers/akamai/mock_tests.rs |  4 ++--
+ src/providers/akamai/mod.rs        |  6 +++---
+ 5 files changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/docs/platforms.md b/docs/platforms.md
+index d2795735..d86a4219 100644
+--- a/docs/platforms.md
++++ b/docs/platforms.md
+@@ -8,6 +8,9 @@ By default Afterburn uses the Ignition platform ID to detect the environment whe
+ 
+ The following platforms are supported, with a different set of features available on each:
+ 
++* akamai
++  - Attributes
++  - SSH Keys
+ * aliyun
+   - Attributes
+   - SSH Keys
+diff --git a/docs/release-notes.md b/docs/release-notes.md
+index b488bfcd..2c09e9b2 100644
+--- a/docs/release-notes.md
++++ b/docs/release-notes.md
+@@ -8,6 +8,8 @@ nav_order: 8
+ 
+ Major changes:
+ 
++- Add support for Akamai Connected Cloud (Linode)
++
+ Minor changes:
+ 
+ Packaging changes:
+diff --git a/docs/usage/attributes.md b/docs/usage/attributes.md
+index f3868f92..8baaab4f 100644
+--- a/docs/usage/attributes.md
++++ b/docs/usage/attributes.md
+@@ -13,6 +13,20 @@ which wants to make use of Afterburn metadata must explicitly pull it in using e
+ 
+ Cloud providers with supported metadata endpoints and their respective attributes are listed below.
+ 
++* akamai
++  - AFTERBURN_AKAMAI_INSTANCE_HOST_UUID
++  - AFTERBURN_AKAMAI_INSTANCE_ID
++  - AFTERBURN_AKAMAI_INSTANCE_LABEL
++  - AFTERBURN_AKAMAI_INSTANCE_REGION
++  - AFTERBURN_AKAMAI_INSTANCE_TAGS
++  - AFTERBURN_AKAMAI_INSTANCE_TYPE
++  - AFTERBURN_AKAMAI_IPV6_LINK_LOCAL
++  - AFTERBURN_AKAMAI_IPV6_RANGE_0
++  - AFTERBURN_AKAMAI_IPV6_SHARED_RANGE_0
++  - AFTERBURN_AKAMAI_IPV6_SLAAC
++  - AFTERBURN_AKAMAI_PRIVATE_IPV4_0
++  - AFTERBURN_AKAMAI_PUBLIC_IPV4_0
++  - AFTERBURN_AKAMAI_SHARED_IPV4_0
+ * aliyun
+   - AFTERBURN_ALIYUN_EIPV4
+   - AFTERBURN_ALIYUN_HOSTNAME
+diff --git a/src/providers/akamai/mock_tests.rs b/src/providers/akamai/mock_tests.rs
+index 378789bf..b01806f7 100644
+--- a/src/providers/akamai/mock_tests.rs
++++ b/src/providers/akamai/mock_tests.rs
+@@ -88,8 +88,8 @@ fn test_attributes() {
+         "AKAMAI_INSTANCE_REGION".to_string() => "us-ord".to_string(),
+         "AKAMAI_INSTANCE_TYPE".to_string() => "g6-nanode-1".to_string(),
+         "AKAMAI_INSTANCE_TAGS".to_string() => "foo:bar:baz".to_string(),
+-        "AKAMAI_IPV4_PUBLIC_0".to_string() => "1.2.3.4/32".to_string(),
+-        "AKAMAI_IPV4_PRIVATE_0".to_string() => "192.168.1.1/32".to_string(),
++        "AKAMAI_PUBLIC_IPV4_0".to_string() => "1.2.3.4/32".to_string(),
++        "AKAMAI_PRIVATE_IPV4_0".to_string() => "192.168.1.1/32".to_string(),
+         "AKAMAI_IPV6_SLAAC".to_string() => "2600:3c06::f03c:94ff:fecb:c10b/128".to_string(),
+         "AKAMAI_IPV6_LINK_LOCAL".to_string() => "fe80::f03c:94ff:fecb:c10b/128".to_string(),
+     };
+diff --git a/src/providers/akamai/mod.rs b/src/providers/akamai/mod.rs
+index 69a22079..b36639b4 100644
+--- a/src/providers/akamai/mod.rs
++++ b/src/providers/akamai/mod.rs
+@@ -144,15 +144,15 @@ impl AkamaiProvider {
+ 
+         // IPv4
+         for (i, addr) in data.ipv4.public.iter().enumerate() {
+-            net_attrs.push((format!("AKAMAI_IPV4_PUBLIC_{i}"), format!("{addr}")));
++            net_attrs.push((format!("AKAMAI_PUBLIC_IPV4_{i}"), format!("{addr}")));
+         }
+ 
+         for (i, addr) in data.ipv4.private.iter().enumerate() {
+-            net_attrs.push((format!("AKAMAI_IPV4_PRIVATE_{i}"), format!("{addr}")));
++            net_attrs.push((format!("AKAMAI_PRIVATE_IPV4_{i}"), format!("{addr}")));
+         }
+ 
+         for (i, addr) in data.ipv4.shared.iter().enumerate() {
+-            net_attrs.push((format!("AKAMAI_IPV4_SHARED_{i}"), format!("{addr}")));
++            net_attrs.push((format!("AKAMAI_SHARED_IPV4_{i}"), format!("{addr}")));
+         }
+ 
+         // IPv6
+
+From 94e14edb225b2941b759d50aae923f8085c979c2 Mon Sep 17 00:00:00 2001
+From: Nick Saika <nsaika@akamai.com>
+Date: Mon, 8 Apr 2024 18:54:28 +0000
+Subject: [PATCH 4/4] fixup! providers: Add "akamai" provider
+
+---
+ src/providers/akamai/mock_tests.rs |  9 ++++++++-
+ src/providers/akamai/mod.rs        | 30 ++++--------------------------
+ 2 files changed, 12 insertions(+), 27 deletions(-)
+
+diff --git a/src/providers/akamai/mock_tests.rs b/src/providers/akamai/mock_tests.rs
+index b01806f7..411b6f28 100644
+--- a/src/providers/akamai/mock_tests.rs
++++ b/src/providers/akamai/mock_tests.rs
+@@ -45,7 +45,14 @@ fn test_attributes() {
+ 
+     // Mock the /v1/network endpoint.
+     let network_metadata = r#"{
+-        "interfaces": [],
++        "interfaces": [
++          {
++            "id": 12345678,
++            "purpose": "public",
++            "label": null,
++            "ipam_address": null
++          }
++        ],
+         "ipv4": {
+             "public": [
+                 "1.2.3.4/32"
+diff --git a/src/providers/akamai/mod.rs b/src/providers/akamai/mod.rs
+index b36639b4..77368787 100644
+--- a/src/providers/akamai/mod.rs
++++ b/src/providers/akamai/mod.rs
+@@ -26,7 +26,6 @@ use reqwest::header::{HeaderName, HeaderValue};
+ use serde::Deserialize;
+ use std::collections::HashMap;
+ 
+-// use crate::network;
+ use crate::providers::MetadataProvider;
+ use crate::retry;
+ 
+@@ -198,12 +197,6 @@ impl MetadataProvider for AkamaiProvider {
+ 
+         Ok(public_keys)
+     }
+-
+-    // TODO: See if this can be implemented with the information that comes back from the
+-    // /v1/network endpoint.
+-    // fn networks(&self) -> Result<Vec<network::Interface>> {
+-    //     unimplemented!()
+-    // }
+ }
+ 
+ #[derive(Clone, Deserialize)]
+@@ -248,16 +241,7 @@ struct Specs {
+ #[derive(Clone, Deserialize)]
+ struct Backups {
+     enabled: bool,
+-    status: Option<BackupStatus>,
+-}
+-
+-#[allow(dead_code)]
+-#[derive(Clone, Deserialize)]
+-#[serde(untagged, rename_all = "lowercase")]
+-enum BackupStatus {
+-    Pending,
+-    Running,
+-    Complete,
++    status: Option<String>, // pending, running, complete
+ }
+ 
+ #[derive(Clone, Deserialize)]
+@@ -271,18 +255,12 @@ struct Network {
+ #[allow(dead_code)]
+ #[derive(Clone, Deserialize)]
+ struct NetworkInterface {
+-    purpose: InterfacePurpose,
+-    label: String,
++    id: u64,
++    purpose: Option<String>, // public, vlan
++    label: Option<String>,
+     ipam_address: Option<String>,
+ }
+ 
+-#[derive(Clone, Deserialize)]
+-#[serde(untagged, rename_all = "lowercase")]
+-enum InterfacePurpose {
+-    Public,
+-    Vlan,
+-}
+-
+ #[derive(Clone, Deserialize)]
+ struct Ipv4 {
+     public: Vec<String>,
