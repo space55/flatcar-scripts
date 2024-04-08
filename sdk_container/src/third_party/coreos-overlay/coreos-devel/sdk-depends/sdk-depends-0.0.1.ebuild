@@ -34,7 +34,6 @@ DEPEND="
 	dev-util/checkbashisms
 	dev-util/pahole
 	dev-util/patchelf
-	dev-util/source-highlight
 	dev-vcs/repo
 	net-dns/bind-tools
 	>=net-dns/dnsmasq-2.72[dhcp,ipv6]
