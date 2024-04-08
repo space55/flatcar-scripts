@@ -44,7 +44,10 @@ BDEPEND="
 		dev-python/selenium[${PYTHON_USEDEP}]
 	)"
 
-distutils_enable_tests nose
+# Flatcar: There is no "nose" test runner any more. Also, we are not
+# running tests anyway.
+#
+# distutils_enable_tests nose
 
 src_prepare() {
 	# remove bundled libs.
