@@ -305,7 +305,6 @@ dev-util/patchutils
 dev-util/perf
 dev-util/pkgconf
 dev-util/re2c
-dev-util/source-highlight
 
 dev-vcs/git
 dev-vcs/repo
