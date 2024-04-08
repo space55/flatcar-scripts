@@ -1,0 +1,3 @@
+- coreutils ([coreutils-2024-03-28](https://lists.gnu.org/archive/html/info-gnu/2024-03/msg00006.html))
+- nghttp2 ([CVE-2024-28182](https://nvd.nist.gov/vuln/detail/CVE-2024-28182))
+- util-linux ([CVE-2024-28085](https://nvd.nist.gov/vuln/detail/CVE-2024-28085))
