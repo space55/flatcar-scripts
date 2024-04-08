@@ -218,6 +218,9 @@ jobs:
           formats=$(echo "$formats" | tr ' ' '\n' | sed 's/equinix_metal/packet/g')
 
           for format in ${formats}; do
+              if [ "${format}" = qemu ] || [ "${format}" = qemu_uefi_secure ]; then
+                  continue
+              fi
               echo " ###################  VENDOR '${format}' ################### "
               ./run_sdk_container -n "${container_name}" \
                   ./image_to_vm.sh --format "${format}" --board="${arch}-usr" \
