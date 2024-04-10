@@ -65,7 +65,7 @@ ERROR_VETH="CONFIG_VETH: needed for internal (host-to-container) networking"
 
 VERIFY_SIG_OPENPGP_KEY_PATH=/usr/share/openpgp-keys/linuxcontainers.asc
 
-DOCS=( AUTHORS CONTRIBUTING MAINTAINERS README.md doc/FAQ.txt )
+#DOCS=( AUTHORS CONTRIBUTING MAINTAINERS README.md doc/FAQ.txt )
 
 pkg_setup() {
 	linux-info_pkg_setup
