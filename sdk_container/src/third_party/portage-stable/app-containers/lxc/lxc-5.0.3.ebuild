@@ -3,7 +3,7 @@
 
 EAPI=8
 
-inherit bash-completion-r1 linux-info meson optfeature systemd toolchain-funcs verify-sig
+inherit bash-completion-r1 linux-info meson-multilib optfeature systemd toolchain-funcs verify-sig
 
 DESCRIPTION="A userspace interface for the Linux kernel containment features"
 HOMEPAGE="https://linuxcontainers.org/ https://github.com/lxc/lxc"
@@ -71,7 +71,7 @@ pkg_setup() {
 	linux-info_pkg_setup
 }
 
-src_configure() {
+multilib_src_configure() {
 	local emesonargs=(
 		--localstatedir "${EPREFIX}/var"
 
@@ -121,7 +121,7 @@ src_configure() {
 	meson_src_configure
 }
 
-src_install() {
+multilib_src_install() {
 	meson_src_install
 
 	# The main bash-completion file will collide with lxd, need to relocate and update symlinks.
