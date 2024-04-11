@@ -3,14 +3,14 @@
 # Distributed under the terms of the GNU General Public License v2
 
 EAPI=7
-CROS_WORKON_PROJECT="flatcar/init"
+CROS_WORKON_PROJECT="apricote/flatcar-init"
 CROS_WORKON_LOCALNAME="init"
 CROS_WORKON_REPO="https://github.com"
 
 if [[ "${PV}" == 9999 ]]; then
 	KEYWORDS="~amd64 ~arm ~arm64 ~x86"
 else
-	CROS_WORKON_COMMIT="32982439c691b6de6446f82b8713edb09451d97b" # flatcar-master
+	CROS_WORKON_COMMIT="f2ee8abbd3fe4b530dd41a80a7b8f80c148f7773" # hetzner
 	KEYWORDS="amd64 arm arm64 x86"
 fi
 
