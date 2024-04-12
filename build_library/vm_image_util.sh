@@ -281,11 +281,10 @@ IMG_azure_OEM_PACKAGE=common-oem-files
 IMG_azure_OEM_SYSEXT=oem-azure
 
 ## hetzner
-IMG_hetzner_DISK_FORMAT=raw
 IMG_hetzner_DISK_LAYOUT=vm
 IMG_hetzner_OEM_USE=hetzner
 IMG_hetzner_OEM_PACKAGE=common-oem-files
-# IMG_hetzner_OEM_SYSEXT=
+IMG_hetzner_OEM_SYSEXT=oem-hetzner
 
 ## hyper-v
 IMG_hyperv_DISK_FORMAT=vhd
