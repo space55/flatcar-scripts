@@ -128,7 +128,7 @@ src_compile() {
 	if tc-is-cross-compiler; then
 		export CGO_LDFLAGS_ALLOW="${CGO_LDFLAGS_ALLOW} -L,-rpath-link"
 		export CGO_CFLAGS="${CGO_CFLAGS} -I${ESYSROOT}/usr/include"
-		export CGO_LDFLAGS="${CGO_LDFLAGS} -L${ESYSROOT}/usr/lib64 -Wl,-rpath-link,${ESYSROOT}/usr/lib64"
+		export CGO_LDFLAGS="${CGO_LDFLAGS} -L${ESYSROOT}/usr/$(get_libdir) -Wl,-rpath-link,${ESYSROOT}/usr/$(get_libdir)"
 	fi
 
 	for k in incus-benchmark incus-user incus lxc-to-incus ; do
