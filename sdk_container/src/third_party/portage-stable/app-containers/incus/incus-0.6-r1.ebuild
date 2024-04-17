@@ -129,6 +129,8 @@ src_compile() {
 		export CGO_LDFLAGS_ALLOW="${CGO_LDFLAGS_ALLOW} -L,-rpath-link"
 		export CGO_CFLAGS="${CGO_CFLAGS} -I${ESYSROOT}/usr/include"
 		export CGO_LDFLAGS="${CGO_LDFLAGS} -L${ESYSROOT}/usr/$(get_libdir) -Wl,-rpath-link,${ESYSROOT}/usr/$(get_libdir)"
+		go-env_set_compile_environment
+		tc-export CC CXX
 	fi
 
 	for k in incus-benchmark incus-user incus lxc-to-incus ; do
