@@ -85,6 +85,11 @@ GOPATH="${S}/_dist"
 
 PATCHES=( "${FILESDIR}"/incus-0.6-fix-column-handling-with-all-projects.patch )
 
+src_unpack() {
+	verify-sig_src_unpack
+	go-module_src_unpack
+}
+
 src_prepare() {
 	export GOPATH="${S}/_dist"
 
@@ -125,13 +130,6 @@ src_configure() { :; }
 src_compile() {
 	export GOPATH="${S}/_dist"
 	export CGO_LDFLAGS_ALLOW="-Wl,-z,now"
-	if tc-is-cross-compiler; then
-		export CGO_LDFLAGS_ALLOW="${CGO_LDFLAGS_ALLOW} -L,-rpath-link"
-		export CGO_CFLAGS="${CGO_CFLAGS} -I${ESYSROOT}/usr/include"
-		export CGO_LDFLAGS="${CGO_LDFLAGS} -L${ESYSROOT}/usr/$(get_libdir) -Wl,-rpath-link,${ESYSROOT}/usr/$(get_libdir)"
-		go-env_set_compile_environment
-		tc-export CC CXX
-	fi
 
 	for k in incus-benchmark incus-user incus lxc-to-incus ; do
 		ego install -v -x "${S}/cmd/${k}"
@@ -160,7 +158,7 @@ src_test() {
 
 src_install() {
 	export GOPATH="${S}/_dist"
-	local bindir="_dist/bin"
+	local bindir="_dist/bin/linux_${GOARCH}"
 
 	newsbin "${FILESDIR}"/incus-startup-0.4.sh incus-startup
 
