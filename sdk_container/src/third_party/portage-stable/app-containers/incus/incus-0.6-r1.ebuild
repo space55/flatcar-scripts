@@ -158,7 +158,12 @@ src_test() {
 
 src_install() {
 	export GOPATH="${S}/_dist"
-	local bindir="_dist/bin/linux_${GOARCH}"
+
+	if [[ "${GOARCH}" == "arm64" ]]; then
+		local bindir="_dist/bin/linux_${GOARCH}"
+	else
+		local bindir="_dist/bin"
+	fi
 
 	newsbin "${FILESDIR}"/incus-startup-0.4.sh incus-startup
 
