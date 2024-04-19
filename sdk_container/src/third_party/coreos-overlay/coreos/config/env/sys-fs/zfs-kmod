@@ -1,2 +1,20 @@
 : ${MODULES_ROOT:=$(echo ${SYSROOT}/lib/modules/*)}
+
+# build/amd64-usr/lib/modules/6.6.23-flatcar/build
+: ${KV_DIR:=$(echo ${MODULES_ROOT}/build)}
+: ${KV_OUT_DIR:=$(echo ${MODULES_ROOT}/build)}
+
+# build/amd64-usr/lib/modules/6.6.23-flatcar/build -> 6.6.23-flatcar
+: ${KV_FULL:=$(echo ${KV_OUT_DIR} | cut -d/ -f6)}
+KV_FULL=${KV_FULL%-flatcar}
+
+: ${KV_MAJOR:=$(echo ${KV_FULL} | cut -d. -f1)}
+: ${KV_MINOR:=$(echo ${KV_FULL} | cut -d. -f2)}
+: ${KV_PATCH:=$(echo ${KV_FULL} | cut -d. -f3)}
+
+echo "override zfs: MODULES_ROOT = ${MODULES_ROOT}"
+echo "override zfs: KV_DIR = ${KV_DIR}"
+echo "override zfs: KV_OUT_DIR = ${KV_OUT_DIR}"
+echo "override zfs: KV_FULL = ${KV_FULL}"
+
 KERNEL_DIR="${MODULES_ROOT}/build"
